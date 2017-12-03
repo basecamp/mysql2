@@ -111,6 +111,12 @@ if try_link('int main() {return 0;}', gcc_flags)
   $CFLAGS << gcc_flags
 end
 
+mysql_h = [prefix, 'mysql.h'].compact.join('/')
+
+# my_bool is replaced by C99 bool in MySQL 8.0, but we want
+# to retain compatibility with the typedef in earlier MySQLs.
+have_type('my_bool', mysql_h)
+
 if RUBY_PLATFORM =~ /mswin|mingw/
   # Build libmysql.a interface link library
   require 'rake'
