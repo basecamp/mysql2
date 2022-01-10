@@ -4,6 +4,12 @@ require 'timeout'
 require 'yaml'
 DatabaseCredentials = YAML.load_file('spec/configuration.yml')
 
+if GC.respond_to?(:verify_compaction_references)
+  # This method was added in Ruby 3.0.0. Calling it this way asks the GC to
+  # move objects around, helping to find object movement bugs.
+  GC.verify_compaction_references(double_heap: true, toward: :empty)
+end
+
 RSpec.configure do |config|
   config.disable_monkey_patching!
 
@@ -40,15 +46,35 @@ RSpec.configure do |config|
     # rubocop:enable Lint/UnifiedInteger
   end
 
-  config.before :each do
-    @client = new_client
+  # Use monotonic time if possible (ruby >= 2.1.0)
+  if defined?(Process::CLOCK_MONOTONIC)
+    def clock_time
+      Process.clock_gettime Process::CLOCK_MONOTONIC
+    end
+  else
+    def clock_time
+      Time.now.to_f
+    end
   end
 
-  config.after :each do
-    @clients.each(&:close)
+  config.before(:suite) do
+    begin
+      new_client
+    rescue Mysql2::Error => e
+      username = DatabaseCredentials['root']['username']
+      database = DatabaseCredentials['root']['database']
+      message = %(
+An error occurred while connecting to the testing database server.
+Make sure that the database server is running.
+Make sure that `mysql -u #{username} [options] #{database}` succeeds by the root user config in spec/configuration.yml.
+Make sure that the testing database '#{database}' exists. If it does not exist, create it.
+)
+      warn message
+      raise e
+    end
   end
 
-  config.before(:all) do
+  config.before(:context) do
     new_client do |client|
       client.query %[
         CREATE TABLE IF NOT EXISTS mysql2_test (
@@ -108,5 +134,13 @@ RSpec.configure do |config|
         )
       ]
     end
+  end
+
+  config.before(:example) do
+    @client = new_client
+  end
+
+  config.after(:example) do
+    @clients.each(&:close)
   end
 end

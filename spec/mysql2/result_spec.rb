@@ -1,16 +1,22 @@
 require 'spec_helper'
 
 RSpec.describe Mysql2::Result do
-  before(:each) do
+  before(:example) do
     @result = @client.query "SELECT 1"
   end
 
   it "should raise a TypeError exception when it doesn't wrap a result set" do
-    r = Mysql2::Result.new
-    expect { r.count }.to raise_error(TypeError)
-    expect { r.fields }.to raise_error(TypeError)
-    expect { r.size }.to raise_error(TypeError)
-    expect { r.each }.to raise_error(TypeError)
+    if RUBY_VERSION >= "3.1"
+      expect { Mysql2::Result.new }.to raise_error(TypeError)
+      expect { Mysql2::Result.allocate }.to raise_error(TypeError)
+    else
+      r = Mysql2::Result.new
+      expect { r.count }.to raise_error(TypeError)
+      expect { r.fields }.to raise_error(TypeError)
+      expect { r.field_types }.to raise_error(TypeError)
+      expect { r.size }.to raise_error(TypeError)
+      expect { r.each }.to raise_error(TypeError)
+    end
   end
 
   it "should have included Enumerable" do
@@ -116,6 +122,97 @@ RSpec.describe Mysql2::Result do
     it "should return an array of field names in proper order" do
       result = @client.query "SELECT 'a', 'b', 'c'"
       expect(result.fields).to eql(%w[a b c])
+    end
+
+    it "should return an array of frozen strings" do
+      result = @client.query "SELECT 'a', 'b', 'c'"
+      result.fields.each do |f|
+        expect(f).to be_frozen
+      end
+    end
+  end
+
+  context "#field_types" do
+    let(:test_result) { @client.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1") }
+
+    it "method should exist" do
+      expect(test_result).to respond_to(:field_types)
+    end
+
+    it "should return correct types" do
+      expected_types = %w[
+        mediumint(9)
+        varchar(10)
+        bit(64)
+        bit(1)
+        tinyint(4)
+        tinyint(1)
+        smallint(6)
+        mediumint(9)
+        int(11)
+        bigint(20)
+        float(10,3)
+        float(10,3)
+        double(10,3)
+        decimal(10,3)
+        decimal(10,3)
+        date
+        datetime
+        timestamp
+        time
+        year(4)
+        char(10)
+        varchar(10)
+        binary(10)
+        varbinary(10)
+        tinyblob
+        tinytext
+        blob
+        text
+        mediumblob
+        mediumtext
+        longblob
+        longtext
+        enum
+        set
+      ]
+
+      expect(test_result.field_types).to eql(expected_types)
+    end
+
+    it "should return an array of field types in proper order" do
+      result = @client.query(
+        "SELECT cast('a' as char), " \
+        "cast(1.2 as decimal(15, 2)), " \
+        "cast(1.2 as decimal(15, 5)), " \
+        "cast(1.2 as decimal(15, 4)), " \
+        "cast(1.2 as decimal(15, 10)), " \
+        "cast(1.2 as decimal(14, 0)), " \
+        "cast(1.2 as decimal(15, 0)), " \
+        "cast(1.2 as decimal(16, 0)), " \
+        "cast(1.0 as decimal(16, 1))",
+      )
+
+      expected_types = %w[
+        varchar(1)
+        decimal(15,2)
+        decimal(15,5)
+        decimal(15,4)
+        decimal(15,10)
+        decimal(14,0)
+        decimal(15,0)
+        decimal(16,0)
+        decimal(16,1)
+      ]
+
+      expect(result.field_types).to eql(expected_types)
+    end
+
+    it "should return json type on mysql 8.0" do
+      next unless /8.\d+.\d+/ =~ @client.server_info[:version]
+
+      result = @client.query("SELECT JSON_OBJECT('key', 'value')")
+      expect(result.field_types).to eql(['json'])
     end
   end
 
@@ -318,8 +415,13 @@ RSpec.describe Mysql2::Result do
     end
 
     it "should raise an error given an invalid DATETIME" do
-      expect { @client.query("SELECT CAST('1972-00-27 00:00:00' AS DATETIME) as bad_datetime").each }.to \
-        raise_error(Mysql2::Error, "Invalid date in field 'bad_datetime': 1972-00-27 00:00:00")
+      if @client.info[:version] < "8.0"
+        expect { @client.query("SELECT CAST('1972-00-27 00:00:00' AS DATETIME) as bad_datetime").each }.to \
+          raise_error(Mysql2::Error, "Invalid date in field 'bad_datetime': 1972-00-27 00:00:00")
+      else
+        expect(@client.query("SELECT CAST('1972-00-27 00:00:00' AS DATETIME) as bad_datetime").to_a.first).to \
+          eql("bad_datetime" => nil)
+      end
     end
 
     context "string encoding for ENUM values" do

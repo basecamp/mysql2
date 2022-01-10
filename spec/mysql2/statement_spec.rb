@@ -1,16 +1,23 @@
 require './spec/spec_helper.rb'
 
 RSpec.describe Mysql2::Statement do
-  before :each do
+  before(:example) do
     @client = new_client(encoding: "utf8")
+  end
+
+  let(:performance_schema_enabled) do
+    performance_schema = @client.query "SHOW VARIABLES LIKE 'performance_schema'"
+    performance_schema.any? { |x| x['Value'] == 'ON' }
   end
 
   def stmt_count
     # Use the performance schema in MySQL 5.7 and above
-    @client.query("SELECT COUNT(1) AS count FROM performance_schema.prepared_statements_instances").first['count'].to_i
-  rescue Mysql2::Error
-    # Fall back to the global prepapred statement counter
-    @client.query("SHOW STATUS LIKE 'Prepared_stmt_count'").first['Value'].to_i
+    if performance_schema_enabled
+      @client.query("SELECT COUNT(1) AS count FROM performance_schema.prepared_statements_instances").first['count'].to_i
+    else
+      # Fall back to the global prepapred statement counter
+      @client.query("SHOW STATUS LIKE 'Prepared_stmt_count'").first['Value'].to_i
+    end
   end
 
   it "should create a statement" do
@@ -211,7 +218,7 @@ RSpec.describe Mysql2::Statement do
   end
 
   context "utf8_db" do
-    before(:each) do
+    before(:example) do
       @client.query("DROP DATABASE IF EXISTS test_mysql2_stmt_utf8")
       @client.query("CREATE DATABASE test_mysql2_stmt_utf8")
       @client.query("USE test_mysql2_stmt_utf8")
@@ -219,7 +226,7 @@ RSpec.describe Mysql2::Statement do
       @client.query("INSERT INTO テーブル (整数, 文字列) VALUES (1, 'イチ'), (2, '弐'), (3, 'さん')")
     end
 
-    after(:each) do
+    after(:example) do
       @client.query("DROP DATABASE test_mysql2_stmt_utf8")
     end
 
@@ -475,8 +482,13 @@ RSpec.describe Mysql2::Statement do
     end
 
     it "should raise an error given an invalid DATETIME" do
-      expect { @client.query("SELECT CAST('1972-00-27 00:00:00' AS DATETIME) as bad_datetime").each }.to \
-        raise_error(Mysql2::Error, "Invalid date in field 'bad_datetime': 1972-00-27 00:00:00")
+      if @client.info[:version] < "8.0"
+        expect { @client.query("SELECT CAST('1972-00-27 00:00:00' AS DATETIME) as bad_datetime").each }.to \
+          raise_error(Mysql2::Error, "Invalid date in field 'bad_datetime': 1972-00-27 00:00:00")
+      else
+        expect(@client.query("SELECT CAST('1972-00-27 00:00:00' AS DATETIME) as bad_datetime").to_a.first).to \
+          eql("bad_datetime" => nil)
+      end
     end
 
     context "string encoding for ENUM values" do
@@ -627,12 +639,12 @@ RSpec.describe Mysql2::Statement do
   end
 
   context 'last_id' do
-    before(:each) do
+    before(:example) do
       @client.query 'USE test'
       @client.query 'CREATE TABLE IF NOT EXISTS lastIdTest (`id` BIGINT NOT NULL AUTO_INCREMENT, blah INT(11), PRIMARY KEY (`id`))'
     end
 
-    after(:each) do
+    after(:example) do
       @client.query 'DROP TABLE lastIdTest'
     end
 
@@ -655,12 +667,12 @@ RSpec.describe Mysql2::Statement do
   end
 
   context 'affected_rows' do
-    before :each do
+    before(:example) do
       @client.query 'USE test'
       @client.query 'CREATE TABLE IF NOT EXISTS lastIdTest (`id` BIGINT NOT NULL AUTO_INCREMENT, blah INT(11), PRIMARY KEY (`id`))'
     end
 
-    after :each do
+    after(:example) do
       @client.query 'DROP TABLE lastIdTest'
     end
 

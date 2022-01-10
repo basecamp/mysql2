@@ -7,7 +7,7 @@ def asplode(lib)
   elsif RUBY_PLATFORM =~ /darwin/
     abort "-----\n#{lib} is missing. You may need to 'brew install mysql' or 'port install mysql', and try again.\n-----"
   else
-    abort "-----\n#{lib} is missing. You may need to 'apt-get install libmysqlclient-dev' or 'yum install mysql-devel', and try again.\n-----"
+    abort "-----\n#{lib} is missing. You may need to 'sudo apt-get install libmariadb-dev', 'sudo apt-get install libmysqlclient-dev' or 'sudo yum install mysql-devel', and try again.\n-----"
   end
 end
 
@@ -15,10 +15,21 @@ def add_ssl_defines(header)
   all_modes_found = %w[SSL_MODE_DISABLED SSL_MODE_PREFERRED SSL_MODE_REQUIRED SSL_MODE_VERIFY_CA SSL_MODE_VERIFY_IDENTITY].inject(true) do |m, ssl_mode|
     m && have_const(ssl_mode, header)
   end
-  $CFLAGS << ' -DFULL_SSL_MODE_SUPPORT' if all_modes_found
-  # if we only have ssl toggle (--ssl,--disable-ssl) from 5.7.3 to 5.7.10
-  has_no_support = all_modes_found ? false : !have_const('MYSQL_OPT_SSL_ENFORCE', header)
-  $CFLAGS << ' -DNO_SSL_MODE_SUPPORT' if has_no_support
+  if all_modes_found
+    $CFLAGS << ' -DFULL_SSL_MODE_SUPPORT'
+  else
+    # if we only have ssl toggle (--ssl,--disable-ssl) from 5.7.3 to 5.7.10
+    # and the verify server cert option. This is also the case for MariaDB.
+    has_verify_support  = have_const('MYSQL_OPT_SSL_VERIFY_SERVER_CERT', header)
+    has_enforce_support = have_const('MYSQL_OPT_SSL_ENFORCE', header)
+    $CFLAGS << ' -DNO_SSL_MODE_SUPPORT' if !has_verify_support && !has_enforce_support
+  end
+end
+
+# Homebrew openssl
+if RUBY_PLATFORM =~ /darwin/ && system("command -v brew")
+  openssl_location = `brew --prefix openssl`.strip
+  $LDFLAGS << " -L#{openssl_location}/lib" if openssl_location
 end
 
 # 2.1+
@@ -27,6 +38,8 @@ have_func('rb_absint_singlebit_p')
 
 # Missing in RBX (https://github.com/rubinius/rubinius/issues/3771)
 have_func('rb_wait_for_single_fd')
+
+have_func("rb_enc_interned_str", "ruby.h")
 
 # borrowed from mysqlplus
 # http://github.com/oldmoe/mysqlplus/blob/master/ext/extconf.rb
@@ -42,6 +55,9 @@ dirs = ENV.fetch('PATH').split(File::PATH_SEPARATOR) + %w[
   /usr/local/mysql-*
   /usr/local/lib/mysql5*
   /usr/local/opt/mysql5*
+  /usr/local/opt/mysql@*
+  /usr/local/opt/mysql-client
+  /usr/local/opt/mysql-client@*
 ].map { |dir| dir << '/bin' }
 
 # For those without HOMEBREW_ROOT in PATH
@@ -148,7 +164,7 @@ end
 $CFLAGS << ' ' << usable_flags.join(' ')
 
 enabled_sanitizers = disabled_sanitizers = []
-# Specify a commna-separated list of sanitizers, or try them all by default
+# Specify a comma-separated list of sanitizers, or try them all by default
 sanitizers = with_config('sanitize')
 case sanitizers
 when true

@@ -18,7 +18,8 @@ VALUE cMysql2Client;
 extern VALUE mMysql2, cMysql2Error, cMysql2TimeoutError;
 static VALUE sym_id, sym_version, sym_header_version, sym_async, sym_symbolize_keys, sym_as, sym_array, sym_stream;
 static VALUE sym_no_good_index_used, sym_no_index_used, sym_query_was_slow;
-static ID intern_brackets, intern_merge, intern_merge_bang, intern_new_with_args;
+static ID intern_brackets, intern_merge, intern_merge_bang, intern_new_with_args,
+  intern_current_query_options, intern_read_timeout;
 
 #define REQUIRE_INITIALIZED(wrapper) \
   if (!wrapper->initialized) { \
@@ -44,7 +45,7 @@ static ID intern_brackets, intern_merge, intern_merge_bang, intern_new_with_args
   }
 
 /*
- * compatability with mysql-connector-c, where LIBMYSQL_VERSION is the correct
+ * compatibility with mysql-connector-c, where LIBMYSQL_VERSION is the correct
  * variable to use, but MYSQL_SERVER_VERSION gives the correct numbers when
  * linking against the server itself
  */
@@ -57,8 +58,23 @@ static ID intern_brackets, intern_merge, intern_merge_bang, intern_new_with_args
 #endif
 
 /*
- * compatibility with mysql-connector-c 6.1.x, and with MySQL 5.7.3 - 5.7.10.
+ * mariadb-connector-c defines CLIENT_SESSION_TRACKING and SESSION_TRACK_TRANSACTION_TYPE
+ * while mysql-connector-c defines CLIENT_SESSION_TRACK and SESSION_TRACK_TRANSACTION_STATE
+ * This is a hack to take care of both clients.
  */
+#if defined(CLIENT_SESSION_TRACK)
+#elif defined(CLIENT_SESSION_TRACKING)
+  #define CLIENT_SESSION_TRACK CLIENT_SESSION_TRACKING
+  #define SESSION_TRACK_TRANSACTION_STATE SESSION_TRACK_TRANSACTION_TYPE
+#endif
+
+/*
+ * compatibility with mysql-connector-c 6.1.x, MySQL 5.7.3 - 5.7.10 & with MariaDB 10.x and later.
+ */
+#ifdef HAVE_CONST_MYSQL_OPT_SSL_VERIFY_SERVER_CERT
+  #define SSL_MODE_VERIFY_IDENTITY 5
+  #define HAVE_CONST_SSL_MODE_VERIFY_IDENTITY
+#endif
 #ifdef HAVE_CONST_MYSQL_OPT_SSL_ENFORCE
   #define SSL_MODE_DISABLED 1
   #define SSL_MODE_REQUIRED 3
@@ -109,18 +125,30 @@ static VALUE rb_set_ssl_mode_option(VALUE self, VALUE setting) {
     rb_warn( "Your mysql client library does not support setting ssl_mode; full support comes with 5.7.11." );
     return Qnil;
   }
-#ifdef HAVE_CONST_MYSQL_OPT_SSL_ENFORCE
+#if defined(HAVE_CONST_MYSQL_OPT_SSL_VERIFY_SERVER_CERT) || defined(HAVE_CONST_MYSQL_OPT_SSL_ENFORCE)
   GET_CLIENT(self);
   int val = NUM2INT( setting );
-  if (version >= 50703 && version < 50711) {
+  // Either MySQL 5.7.3 - 5.7.10, or Connector/C 6.1.3 - 6.1.x, or MariaDB 10.x and later
+  if ((version >= 50703 && version < 50711) || (version >= 60103 && version < 60200) || version >= 100000) {
+#ifdef HAVE_CONST_MYSQL_OPT_SSL_VERIFY_SERVER_CERT
+    if (val == SSL_MODE_VERIFY_IDENTITY) {
+      my_bool b = 1;
+      int result = mysql_options( wrapper->client, MYSQL_OPT_SSL_VERIFY_SERVER_CERT, &b );
+      return INT2NUM(result);
+    }
+#endif
+#ifdef HAVE_CONST_MYSQL_OPT_SSL_ENFORCE
     if (val == SSL_MODE_DISABLED || val == SSL_MODE_REQUIRED) {
       my_bool b = ( val == SSL_MODE_REQUIRED );
       int result = mysql_options( wrapper->client, MYSQL_OPT_SSL_ENFORCE, &b );
       return INT2NUM(result);
-    } else {
-      rb_warn( "MySQL client libraries between 5.7.3 and 5.7.10 only support SSL_MODE_DISABLED and SSL_MODE_REQUIRED" );
-      return Qnil;
     }
+#endif
+    rb_warn( "Your mysql client library does not support ssl_mode %d.", val );
+    return Qnil;
+  } else {
+    rb_warn( "Your mysql client library does not support ssl_mode as expected." );
+    return Qnil;
   }
 #endif
 #ifdef FULL_SSL_MODE_SUPPORT
@@ -135,6 +163,7 @@ static VALUE rb_set_ssl_mode_option(VALUE self, VALUE setting) {
   return INT2NUM(result);
 #endif
 #ifdef NO_SSL_MODE_SUPPORT
+  rb_warn( "Your mysql client library does not support setting ssl_mode; full support comes with 5.7.11." );
   return Qnil;
 #endif
 }
@@ -170,7 +199,7 @@ static void rb_mysql_client_mark(void * wrapper) {
 
 static VALUE rb_raise_mysql2_error(mysql_client_wrapper *wrapper) {
   VALUE rb_error_msg = rb_str_new2(mysql_error(wrapper->client));
-  VALUE rb_sql_state = rb_tainted_str_new2(mysql_sqlstate(wrapper->client));
+  VALUE rb_sql_state = rb_str_new2(mysql_sqlstate(wrapper->client));
   VALUE e;
 
   rb_enc_associate(rb_error_msg, rb_utf8_encoding());
@@ -264,7 +293,7 @@ static VALUE invalidate_fd(int clientfd)
 static void *nogvl_close(void *ptr) {
   mysql_client_wrapper *wrapper = ptr;
 
-  if (!wrapper->closed) {
+  if (wrapper->initialized && !wrapper->closed) {
     mysql_close(wrapper->client);
     wrapper->closed = 1;
     wrapper->reconnect_enabled = 0;
@@ -318,9 +347,9 @@ static VALUE allocate(VALUE klass) {
   wrapper->server_version = 0;
   wrapper->reconnect_enabled = 0;
   wrapper->connect_timeout = 0;
-  wrapper->initialized = 0; /* means that that the wrapper is initialized */
+  wrapper->initialized = 0; /* will be set true after calling mysql_init */
+  wrapper->closed = 1; /* will be set false after calling mysql_real_connect */
   wrapper->refcount = 1;
-  wrapper->closed = 0;
   wrapper->client = (MYSQL*)xmalloc(sizeof(MYSQL));
 
   return obj;
@@ -462,6 +491,7 @@ static VALUE rb_mysql_connect(VALUE self, VALUE user, VALUE pass, VALUE host, VA
       rb_raise_mysql2_error(wrapper);
   }
 
+  wrapper->closed = 0;
   wrapper->server_version = mysql_get_server_version(wrapper->client);
   return self;
 }
@@ -508,10 +538,10 @@ static void *nogvl_send_query(void *ptr) {
   return (void*)(rv == 0 ? Qtrue : Qfalse);
 }
 
-static VALUE do_send_query(void *args) {
-  struct nogvl_send_query_args *query_args = args;
+static VALUE do_send_query(VALUE args) {
+  struct nogvl_send_query_args *query_args = (void *)args;
   mysql_client_wrapper *wrapper = query_args->wrapper;
-  if ((VALUE)rb_thread_call_without_gvl(nogvl_send_query, args, RUBY_UBF_IO, 0) == Qfalse) {
+  if ((VALUE)rb_thread_call_without_gvl(nogvl_send_query, query_args, RUBY_UBF_IO, 0) == Qfalse) {
     /* an error occurred, we're not active anymore */
     wrapper->active_thread = Qnil;
     rb_raise_mysql2_error(wrapper);
@@ -579,7 +609,7 @@ static VALUE rb_mysql_client_async_result(VALUE self) {
     rb_raise_mysql2_error(wrapper);
   }
 
-  is_streaming = rb_hash_aref(rb_iv_get(self, "@current_query_options"), sym_stream);
+  is_streaming = rb_hash_aref(rb_ivar_get(self, intern_current_query_options), sym_stream);
   if (is_streaming == Qtrue) {
     result = (MYSQL_RES *)rb_thread_call_without_gvl(nogvl_use_result, wrapper, RUBY_UBF_IO, 0);
   } else {
@@ -596,7 +626,7 @@ static VALUE rb_mysql_client_async_result(VALUE self) {
   }
 
   // Duplicate the options hash and put the copy in the Result object
-  current = rb_hash_dup(rb_iv_get(self, "@current_query_options"));
+  current = rb_hash_dup(rb_ivar_get(self, intern_current_query_options));
   (void)RB_GC_GUARD(current);
   Check_Type(current, T_HASH);
   resultObj = rb_mysql_result_to_obj(self, wrapper->encoding, current, result, Qnil);
@@ -631,15 +661,15 @@ static VALUE disconnect_and_raise(VALUE self, VALUE error) {
   rb_exc_raise(error);
 }
 
-static VALUE do_query(void *args) {
-  struct async_query_args *async_args = args;
+static VALUE do_query(VALUE args) {
+  struct async_query_args *async_args = (void *)args;
   struct timeval tv;
   struct timeval *tvp;
   long int sec;
   int retval;
   VALUE read_timeout;
 
-  read_timeout = rb_iv_get(async_args->self, "@read_timeout");
+  read_timeout = rb_ivar_get(async_args->self, intern_read_timeout);
 
   tvp = NULL;
   if (!NIL_P(read_timeout)) {
@@ -767,7 +797,7 @@ static VALUE rb_mysql_query(VALUE self, VALUE sql, VALUE current) {
 
   (void)RB_GC_GUARD(current);
   Check_Type(current, T_HASH);
-  rb_iv_set(self, "@current_query_options", current);
+  rb_ivar_set(self, intern_current_query_options, current);
 
   Check_Type(sql, T_STRING);
   /* ensure the string is in the encoding the connection is expecting */
@@ -780,6 +810,7 @@ static VALUE rb_mysql_query(VALUE self, VALUE sql, VALUE current) {
 
 #ifndef _WIN32
   rb_rescue2(do_send_query, (VALUE)&args, disconnect_and_raise, self, rb_eException, (VALUE)0);
+  (void)RB_GC_GUARD(sql);
 
   if (rb_hash_aref(current, sym_async) == Qtrue) {
     return Qnil;
@@ -792,7 +823,8 @@ static VALUE rb_mysql_query(VALUE self, VALUE sql, VALUE current) {
     return rb_ensure(rb_mysql_client_async_result, self, disconnect_and_mark_inactive, self);
   }
 #else
-  do_send_query(&args);
+  do_send_query((VALUE)&args);
+  (void)RB_GC_GUARD(sql);
 
   /* this will just block until the result is ready */
   return rb_ensure(rb_mysql_client_async_result, self, disconnect_and_mark_inactive, self);
@@ -1017,6 +1049,36 @@ static VALUE rb_mysql_client_last_id(VALUE self) {
 }
 
 /* call-seq:
+ *    client.session_track
+ *
+ * Returns information about changes to the session state on the server.
+ */
+static VALUE rb_mysql_client_session_track(VALUE self, VALUE type) {
+#ifdef CLIENT_SESSION_TRACK
+  const char *data;
+  size_t length;
+  my_ulonglong retVal;
+  GET_CLIENT(self);
+
+  REQUIRE_CONNECTED(wrapper);
+  retVal = mysql_session_track_get_first(wrapper->client, NUM2INT(type), &data, &length);
+  if (retVal != 0) {
+    return Qnil;
+  }
+  VALUE rbAry = rb_ary_new();
+  VALUE rbFirst = rb_str_new(data, length);
+  rb_ary_push(rbAry, rbFirst);
+  while(mysql_session_track_get_next(wrapper->client, NUM2INT(type), &data, &length) == 0) {
+    VALUE rbNext = rb_str_new(data, length);
+    rb_ary_push(rbAry, rbNext);
+  }
+  return rbAry;
+#else
+  return Qnil;
+#endif
+}
+
+/* call-seq:
  *    client.affected_rows
  *
  * returns the number of rows changed, deleted, or inserted by the last statement
@@ -1179,7 +1241,7 @@ static VALUE rb_mysql_client_store_result(VALUE self)
   }
 
   // Duplicate the options hash and put the copy in the Result object
-  current = rb_hash_dup(rb_iv_get(self, "@current_query_options"));
+  current = rb_hash_dup(rb_ivar_get(self, intern_current_query_options));
   (void)RB_GC_GUARD(current);
   Check_Type(current, T_HASH);
   resultObj = rb_mysql_result_to_obj(self, wrapper->encoding, current, result, Qnil);
@@ -1265,7 +1327,7 @@ static VALUE set_read_timeout(VALUE self, VALUE value) {
   /* Set the instance variable here even though _mysql_client_options
      might not succeed, because the timeout is used in other ways
      elsewhere */
-  rb_iv_set(self, "@read_timeout", value);
+  rb_ivar_set(self, intern_read_timeout, value);
   return _mysql_client_options(self, MYSQL_OPT_READ_TIMEOUT, value);
 }
 
@@ -1406,6 +1468,7 @@ void init_mysql2_client() {
   mMysql2      = rb_define_module("Mysql2"); Teach RDoc about Mysql2 constant.
 #endif
   cMysql2Client = rb_define_class_under(mMysql2, "Client", rb_cObject);
+  rb_global_variable(&cMysql2Client);
 
   rb_define_alloc_func(cMysql2Client, allocate);
 
@@ -1436,6 +1499,7 @@ void init_mysql2_client() {
   rb_define_method(cMysql2Client, "query_info_string", rb_mysql_info, 0);
   rb_define_method(cMysql2Client, "ssl_cipher", rb_mysql_get_ssl_cipher, 0);
   rb_define_method(cMysql2Client, "encoding", rb_mysql_client_encoding, 0);
+  rb_define_method(cMysql2Client, "session_track", rb_mysql_client_session_track, 1);
 
   rb_define_private_method(cMysql2Client, "connect_timeout=", set_connect_timeout, 1);
   rb_define_private_method(cMysql2Client, "read_timeout=", set_read_timeout, 1);
@@ -1471,6 +1535,8 @@ void init_mysql2_client() {
   intern_merge = rb_intern("merge");
   intern_merge_bang = rb_intern("merge!");
   intern_new_with_args = rb_intern("new_with_args");
+  intern_current_query_options = rb_intern("@current_query_options");
+  intern_read_timeout = rb_intern("@read_timeout");
 
 #ifdef CLIENT_LONG_PASSWORD
   rb_const_set(cMysql2Client, rb_intern("LONG_PASSWORD"),
@@ -1606,15 +1672,31 @@ void init_mysql2_client() {
       INT2NUM(0));
 #endif
 
+#ifdef CLIENT_SESSION_TRACK
+  rb_const_set(cMysql2Client, rb_intern("SESSION_TRACK"), INT2NUM(CLIENT_SESSION_TRACK));
+  /* From mysql_com.h -- but stable from at least 5.7.4 through 8.0.20 */
+  rb_const_set(cMysql2Client, rb_intern("SESSION_TRACK_SYSTEM_VARIABLES"), INT2NUM(SESSION_TRACK_SYSTEM_VARIABLES));
+  rb_const_set(cMysql2Client, rb_intern("SESSION_TRACK_SCHEMA"), INT2NUM(SESSION_TRACK_SCHEMA));
+  rb_const_set(cMysql2Client, rb_intern("SESSION_TRACK_STATE_CHANGE"), INT2NUM(SESSION_TRACK_STATE_CHANGE));
+  rb_const_set(cMysql2Client, rb_intern("SESSION_TRACK_GTIDS"), INT2NUM(SESSION_TRACK_GTIDS));
+  rb_const_set(cMysql2Client, rb_intern("SESSION_TRACK_TRANSACTION_CHARACTERISTICS"), INT2NUM(SESSION_TRACK_TRANSACTION_CHARACTERISTICS));
+  rb_const_set(cMysql2Client, rb_intern("SESSION_TRACK_TRANSACTION_STATE"), INT2NUM(SESSION_TRACK_TRANSACTION_STATE));
+#endif
+
 #if defined(FULL_SSL_MODE_SUPPORT) // MySQL 5.7.11 and above
   rb_const_set(cMysql2Client, rb_intern("SSL_MODE_DISABLED"), INT2NUM(SSL_MODE_DISABLED));
   rb_const_set(cMysql2Client, rb_intern("SSL_MODE_PREFERRED"), INT2NUM(SSL_MODE_PREFERRED));
   rb_const_set(cMysql2Client, rb_intern("SSL_MODE_REQUIRED"), INT2NUM(SSL_MODE_REQUIRED));
   rb_const_set(cMysql2Client, rb_intern("SSL_MODE_VERIFY_CA"), INT2NUM(SSL_MODE_VERIFY_CA));
   rb_const_set(cMysql2Client, rb_intern("SSL_MODE_VERIFY_IDENTITY"), INT2NUM(SSL_MODE_VERIFY_IDENTITY));
-#elif defined(HAVE_CONST_MYSQL_OPT_SSL_ENFORCE) // MySQL 5.7.3 - 5.7.10
+#else
+#ifdef HAVE_CONST_MYSQL_OPT_SSL_VERIFY_SERVER_CERT // MySQL 5.7.3 - 5.7.10 & MariaDB 10.x and later
+  rb_const_set(cMysql2Client, rb_intern("SSL_MODE_VERIFY_IDENTITY"), INT2NUM(SSL_MODE_VERIFY_IDENTITY));
+#endif
+#ifdef HAVE_CONST_MYSQL_OPT_SSL_ENFORCE // MySQL 5.7.3 - 5.7.10 & MariaDB 10.x and later
   rb_const_set(cMysql2Client, rb_intern("SSL_MODE_DISABLED"), INT2NUM(SSL_MODE_DISABLED));
   rb_const_set(cMysql2Client, rb_intern("SSL_MODE_REQUIRED"), INT2NUM(SSL_MODE_REQUIRED));
+#endif
 #endif
 
 #ifndef HAVE_CONST_SSL_MODE_DISABLED
