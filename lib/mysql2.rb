@@ -38,11 +38,16 @@ require 'mysql2/client'
 module Mysql2
 end
 
-if defined?(ActiveRecord::VERSION::STRING) && ActiveRecord::VERSION::STRING >= "3.1"
-  warn "============= WARNING FROM mysql2 ============="
-  warn "This version of mysql2 (#{Mysql2::VERSION}) isn't compatible with Rails 3.1 as the ActiveRecord adapter was pulled into Rails itself."
-  warn "Please use the 0.3.x (or greater) releases if you plan on using it in Rails >= 3.1.x"
-  warn "============= END WARNING FROM mysql2 ============="
+if defined?(ActiveRecord::VERSION::STRING) && ActiveRecord::VERSION::STRING < "3.1"
+  begin
+    require 'active_record/connection_adapters/mysql2_adapter'
+  rescue LoadError
+    warn "============= WARNING FROM mysql2 ============="
+    warn "This version of mysql2 (#{Mysql2::VERSION}) doesn't ship with the ActiveRecord adapter."
+    warn "In Rails version 3.1.0 and up, the mysql2 ActiveRecord adapter is included with rails."
+    warn "If you want to use the mysql2 gem with Rails <= 3.0.x, please use the latest mysql2 in the 0.2.x series."
+    warn "============= END WARNING FROM mysql2 ============="
+  end
 end
 
 # For holding utility methods
