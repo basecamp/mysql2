@@ -794,10 +794,12 @@ static VALUE _mysql_client_options(VALUE self, int opt, VALUE value) {
       retval = &boolval;
       break;
 
+#if defined(MYSQL_SECURE_AUTH)
     case MYSQL_SECURE_AUTH:
       boolval = (value == Qfalse ? 0 : 1);
       retval = &boolval;
       break;
+#endif
 
     case MYSQL_READ_DEFAULT_FILE:
       charval = (const char *)StringValueCStr(value);
@@ -1182,7 +1184,10 @@ static VALUE set_ssl_options(VALUE self, VALUE key, VALUE cert, VALUE ca, VALUE 
 }
 
 static VALUE set_secure_auth(VALUE self, VALUE value) {
+/* This option was deprecated in MySQL 5.x and removed in MySQL 8.0 */
+#if defined(MYSQL_SECURE_AUTH)
   return _mysql_client_options(self, MYSQL_SECURE_AUTH, value);
+#endif
 }
 
 static VALUE set_read_default_file(VALUE self, VALUE value) {
@@ -1210,6 +1215,7 @@ static VALUE initialize_ext(VALUE self) {
 }
 
 void init_mysql2_client() {
+#ifdef _WIN32
   /* verify the libmysql we're about to use was the version we were built against
      https://github.com/luislavena/mysql-gem/commit/a600a9c459597da0712f70f43736e24b484f8a99 */
   int i;
@@ -1227,6 +1233,7 @@ void init_mysql2_client() {
       return;
     }
   }
+#endif
 
   /* Initializing mysql library, so different threads could call Client.new */
   /* without race condition in the library */
@@ -1297,6 +1304,10 @@ void init_mysql2_client() {
 #ifdef CLIENT_LONG_PASSWORD
   rb_const_set(cMysql2Client, rb_intern("LONG_PASSWORD"),
       LONG2NUM(CLIENT_LONG_PASSWORD));
+#else
+  /* HACK because MariaDB 10.2 no longer defines this constant,
+   * but we're using it in our default connection flags. */
+  rb_const_set(cMysql2Client, rb_intern("LONG_PASSWORD"), INT2NUM(0));
 #endif
 
 #ifdef CLIENT_FOUND_ROWS
