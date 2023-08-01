@@ -28,6 +28,7 @@ mysql_to_rb = {
   "macroman" => "macRoman",
   "cp852"    => "CP852",
   "latin7"   => "ISO-8859-13",
+  "utf8mb3"  => "UTF-8",
   "utf8mb4"  => "UTF-8",
   "cp1251"   => "Windows-1251",
   "utf16"    => "UTF-16",
@@ -37,10 +38,12 @@ mysql_to_rb = {
   "binary"   => "ASCII-8BIT",
   "geostd8"  => nil,
   "cp932"    => "Windows-31J",
-  "eucjpms"  => "eucJP-ms"
+  "eucjpms"  => "eucJP-ms",
+  "utf16le"  => "UTF-16LE",
+  "gb18030"  => "GB18030",
 }
 
-puts <<-header
+puts <<-HEADER
 %readonly-tables
 %enum
 %define lookup-function-name mysql2_mysql_enc_name_to_rb
@@ -48,13 +51,13 @@ puts <<-header
 %struct-type
 struct mysql2_mysql_enc_name_to_rb_map { const char *name; const char *rb_name; }
 %%
-header
+HEADER
 
 mysql_to_rb.each do |mysql, ruby|
-  if ruby.nil?
-    name = "NULL"
+  name = if ruby.nil?
+    "NULL"
   else
-    name = "\"#{ruby}\""
+    "\"#{ruby}\""
   end
 
   puts "#{mysql}, #{name}"
