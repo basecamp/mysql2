@@ -33,6 +33,7 @@ mysql_to_rb = {
   "macroman" => "macRoman",
   "cp852"    => "CP852",
   "latin7"   => "ISO-8859-13",
+  "utf8mb3"  => "UTF-8",
   "utf8mb4"  => "UTF-8",
   "cp1251"   => "Windows-1251",
   "utf16"    => "UTF-16",
@@ -42,7 +43,9 @@ mysql_to_rb = {
   "binary"   => "ASCII-8BIT",
   "geostd8"  => "NULL",
   "cp932"    => "Windows-31J",
-  "eucjpms"  => "eucJP-ms"
+  "eucjpms"  => "eucJP-ms",
+  "utf16le"  => "UTF-16LE",
+  "gb18030"  => "GB18030",
 }
 
 client     = Mysql2::Client.new(:username => user, :password => pass, :host => host, :port => port.to_i)
@@ -52,8 +55,11 @@ encodings_with_nil = Array.new(encodings.size)
 
 collations.each do |collation|
   mysql_col_idx = collation[2].to_i
-  rb_enc = mysql_to_rb[collation[1]]
-  encodings[mysql_col_idx-1] = [mysql_col_idx, rb_enc]
+  rb_enc = mysql_to_rb.fetch(collation[1]) do |mysql_enc|
+    warn "WARNING: Missing mapping for collation \"#{collation[0]}\" with encoding \"#{mysql_enc}\" and id #{mysql_col_idx}, assuming NULL"
+    "NULL"
+  end
+  encodings[mysql_col_idx - 1] = [mysql_col_idx, rb_enc]
 end
 
 encodings.each_with_index do |encoding, idx|
@@ -65,10 +71,10 @@ encodings_with_nil.sort! do |a, b|
 end
 
 encodings_with_nil = encodings_with_nil.map do |encoding|
-  name = "NULL"
-
-  if !encoding.nil? && encoding[1] != "NULL"
-    name = "\"#{encoding[1]}\""
+  name = if encoding.nil? || encoding[1] == 'NULL'
+    'NULL'
+  else
+    "\"#{encoding[1]}\""
   end
 
   "  #{name}"
