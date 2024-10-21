@@ -1,5 +1,14 @@
 #include <mysql2_ext.h>
 
+#if !defined(my_bool) && !defined(_WIN32)
+#include <stdbool.h>
+typedef bool my_bool;
+#endif
+
+#if !defined(MYSQL_SECURE_AUTH)
+#define MYSQL_SECURE_AUTH 18
+#endif
+
 #include <time.h>
 #include <errno.h>
 #ifndef _WIN32
