@@ -1,6 +1,8 @@
 #include <mysql2_ext.h>
 
-#if !defined(my_bool) && !defined(_WIN32)
+/* my_bool was removed in MySQL 8.0 (MYSQL_VERSION_ID >= 80000).
+   For older versions, it's already defined in mysql.h as char. */
+#if defined(MYSQL_VERSION_ID) && MYSQL_VERSION_ID >= 80000 && !defined(_WIN32)
 #include <stdbool.h>
 typedef bool my_bool;
 #endif
