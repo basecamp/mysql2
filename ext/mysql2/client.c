@@ -52,9 +52,16 @@ static VALUE rb_hash_dup(VALUE other) {
 /*
  * compatability with mysql-connector-c, where LIBMYSQL_VERSION is the correct
  * variable to use, but MYSQL_SERVER_VERSION gives the correct numbers when
- * linking against the server itself
+ * linking against the server itself.
+ *
+ * MariaDB's headers set LIBMYSQL_VERSION to the server version (e.g. "12.2.2")
+ * but the connector library reports its own version at runtime via
+ * mysql_get_client_info() (e.g. "3.4.9"). Use MARIADB_PACKAGE_VERSION when
+ * available so compile-time and runtime versions agree.
  */
-#ifdef LIBMYSQL_VERSION
+#if defined(MARIADB_PACKAGE_VERSION)
+  #define MYSQL_LINK_VERSION MARIADB_PACKAGE_VERSION
+#elif defined(LIBMYSQL_VERSION)
   #define MYSQL_LINK_VERSION LIBMYSQL_VERSION
 #else
   #define MYSQL_LINK_VERSION MYSQL_SERVER_VERSION
